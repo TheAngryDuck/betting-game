@@ -3,6 +3,7 @@ package com.example.betting;
 import com.example.betting.dto.Bet;
 import com.example.betting.dto.Message;
 import com.example.betting.dto.Player;
+import com.example.betting.dto.Winner;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.web.socket.TextMessage;
@@ -26,34 +27,40 @@ public class GameService {
     private boolean gameRunning = false;
     private final List<Player> players = new ArrayList<>();
     private final List<Bet> bets = new ArrayList<>();
+    private final Random random;
 
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> gameLoop;
+
+    public GameService() {
+        this.random = new Random();
+    }
+
+    public GameService(Random random) {
+        this.random = random;
+    }
 
     public void startGame(Set<WebSocketSession> sessions) {
         if (!gameRunning) {
             gameRunning = true;
             startGameCycle(sessions);
-            System.out.println("Game started");
             broadcastSystemMessage(sessions, "Game started!");
         }
     }
 
-    public void endGame(Set<WebSocketSession> sessions) {
+    public void endGame() {
         if (gameRunning) {
             gameRunning = false;
             stopGameLoop();
-            System.out.println("Game ended");
             players.clear();
-            broadcastSystemMessage(sessions, "Game ended!");
         }
     }
 
-    public void addPlayer(String id) {
-        System.out.println("Player added: " + id);
-        Player player = new Player(id.substring(0, 3),id,0,1000,1000,0.0);
-
+    public void addPlayer(WebSocketSession session) throws IOException {
+        Player player = new Player(session.getId().substring(0, 3),session.getId(),0,1000,1000,0.0);
         players.add(player);
+        String json = objectMapper.writeValueAsString(new Message("System", "Welcome to the game!"));
+        session.sendMessage(new TextMessage(json));
     }
 
     public void addBet(Bet bet) {
@@ -64,51 +71,79 @@ public class GameService {
                 bets.add(bet);
                 player.setBalance(player.getBalance() - bet.getAmount());
                 updatePlayer(player);
-                System.out.println("New balance: " + player.getBalance());
             }
         }
+    }
+
+    public void sendRtp(Set<WebSocketSession> sessions, String id){
+        players.stream().filter(p -> p.getId().equals(id))
+                .findFirst().ifPresent(player -> sendMessage(sessions, id, String.valueOf(player.getRtp())));
+    }
+
+    // For testing
+    public List<Player> getPlayers() {
+        return List.copyOf(players);
+    }
+
+    // For testing
+    public List<Bet> getBets() {
+        return List.copyOf(bets);
     }
 
     private void startGameCycle(Set<WebSocketSession> sessions){
         gameLoop = scheduler.scheduleAtFixedRate(() -> {
             if (!gameRunning) return;
-            try {
-                int number = new Random().nextInt(1,11);
-                System.out.println(number);
-                List<String> winners = findWinners(number, sessions);
-                System.out.println("🎯 Game tick: doing something...");
-                if (!winners.isEmpty()) {
-                    broadcastSystemMessage(sessions,winners.toString());
-                }
-                bets.clear();
-            } catch (Exception e) {
-                System.err.println("Game tick error: " + e.getMessage());
-            }
+            runGameCycle(sessions);
         }, 10, 10, TimeUnit.SECONDS);
     }
 
-    private List<String> findWinners(int number, Set<WebSocketSession> sessions){
-        List<String> winners = new ArrayList<>();
-        for (Bet bet : bets) {
-            if (bet.getNumber() == number) {
-                Player player = players.stream().filter(p -> p.getId()
-                        .equals(bet.getId())).findFirst().orElse(null);
-                if (player != null) {
-                    double winnings = bet.getAmount()* 9.9;
-                    double newBalance = player.getBalance() + winnings;
+    public void runGameCycle(Set<WebSocketSession> sessions) {
+        try {
+            List<Winner> winners = findWinners(sessions);
+            if (!winners.isEmpty()) {
+                broadcastSystemMessage(sessions, objectMapper.writeValueAsString(winners));
+            }
+            bets.clear();
+        } catch (Exception e) {
+            System.err.println("Game cycle error: " + e.getMessage());
+        }
+    }
 
-                    player.setWinnings(player.getWinnings() + winnings);
-                    player.setBalance(newBalance);
-                    player.setRtp(player.getWinnings() / player.getOriginalBalance());
-                    updatePlayer(player);
-                    winners.add(player.getName());
-                    sendMessage(sessions, player.getId(), "You have won: " + winnings + "!");
-                }
-            }else {
-                sendMessage(sessions, bet.getId(), "You have lost.");
+    private List<Winner> findWinners(Set<WebSocketSession> sessions) {
+        int winningNumber = random.nextInt(1, 11);
+
+        List<Winner> winners = new ArrayList<>();
+
+        for (Bet bet : new ArrayList<>(bets)) {
+            Player player = getPlayerById(bet.getId());
+
+            if (player == null) continue;
+
+            if (bet.getNumber() == winningNumber) {
+                double winnings = bet.getAmount() * 9.9;
+                applyWinnings(player, winnings);
+                winners.add(new Winner(player.getName(), winnings));
+                sendMessage(sessions, player.getId(), "You have won: " + winnings + "!");
+            } else {
+                sendMessage(sessions, player.getId(), "You have lost.");
             }
         }
+
         return winners;
+    }
+
+    private Player getPlayerById(String id) {
+        return players.stream()
+                .filter(p -> p.getId().equals(id))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private void applyWinnings(Player player, double winnings) {
+        player.setWinnings(player.getWinnings() + winnings);
+        player.setBalance(player.getBalance() + winnings);
+        player.setRtp(player.getWinnings() / player.getOriginalBalance() * 100);
+        updatePlayer(player);
     }
 
     private void updatePlayer(Player player) {
@@ -135,7 +170,6 @@ public class GameService {
                 try {
                     String json = objectMapper.writeValueAsString(new Message("System", message));
                     p.sendMessage(new TextMessage(json));
-                    System.out.println(p.getId() + " "+message);
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }

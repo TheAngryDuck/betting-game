@@ -1,11 +1,14 @@
 package com.example.betting;
 
 import com.example.betting.dto.Bet;
+import com.example.betting.dto.Message;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.*;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import java.io.IOException;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,32 +25,43 @@ public class MyWebSocketHandler extends TextWebSocketHandler {
     }
 
     @Override
-    public void afterConnectionEstablished(WebSocketSession session) {
+    public void afterConnectionEstablished(WebSocketSession session) throws IOException {
         if (sessions.isEmpty()){
             gameService.startGame(sessions);
         }
         sessions.add(session);
-        gameService.addPlayer(session.getId());
-        System.out.println("Client connected: " + session.getId());
+        gameService.addPlayer(session);
     }
 
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
-        // Deserialize JSON
-        Bet incoming = objectMapper.readValue(message.getPayload(), Bet.class);
-        incoming.setId(session.getId());
-        System.out.println("Received: " + incoming.getNumber() + " from " + incoming.getId());
-        gameService.addBet(incoming);
-
+        try{
+            Bet incoming = objectMapper.readValue(message.getPayload(), Bet.class);
+            incoming.setId(session.getId());
+            if (validateBet(incoming)) {
+                gameService.addBet(incoming);
+            }else{
+                session.sendMessage(new TextMessage("Invalid bet"));
+            }
+            if (incoming.getNumber() == 11){
+                gameService.sendRtp(sessions, session.getId());
+            }
+        } catch (JsonProcessingException e) {
+            String json = objectMapper.writeValueAsString(new Message("System", "Invalid message content: "+message.getPayload()));
+            session.sendMessage(new TextMessage(json));
+        }
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         sessions.remove(session);
-        System.out.println("Client disconnected: " + session.getId());
 
         if (sessions.isEmpty()) {
-            gameService.endGame(sessions);
+            gameService.endGame();
         }
+    }
+
+    private boolean validateBet(Bet bet) {
+        return bet.getNumber() > 0 && bet.getAmount() > 0 && !bet.getId().isEmpty() && bet.getNumber() < 11;
     }
 }
